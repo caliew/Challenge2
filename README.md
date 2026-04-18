@@ -1,3 +1,22 @@
+# Challenge #2: Design a BFF for a Multi-Services Platform
+
+Given that a **Quotation** and **Payment** microservices have been implemented, design a **BFF** (Backend-for-Frontend) that integrates with the microservices to support tailored quotation requirements in the **Customer** and **Agent Portals**.
+
+> [!NOTE]
+> **Customer Portal** allows end-users to purchase a policy directly, without an agent.
+> **Agent Portal** allows insurance agents to purchase policies on behalf of customers.
+
+Demonstrate your expertise in system design. Code is not required for this challenge.
+
+### Key Requirements
+- **A solution design document** outlining the architecture, technologies, deployment, observability, and security strategies and best practices. You may consider to:
+  - Propose a strategy to manage data consistency, integrity, and security at-rest and in-transit especially as payment is involved. The solution should be PII-compliant.
+  - Outline an observability strategy that provides visibility into performance, detect issues proactively, and facilitate troubleshooting and optimization efforts.
+  - Address security concerns through robust authentication and authorization.
+- **An architecture diagram** illustrating the interactions between the BFF, microservices and external components (e.g., payment gateway).
+
+---
+
 # Challenge 2: Backend-For-Frontend (BFF) Proof-of-Concept
 
 This repository contains a functioning "Vertical Slice" Proof-of-Concept (PoC) demonstrating key architectural components from the full Backend-For-Frontend (BFF) Solution Design.
