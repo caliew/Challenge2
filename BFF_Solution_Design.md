@@ -8,6 +8,17 @@ This design emphasizes high scalability, resilient transaction handling, compreh
 
 ---
 
+## 1.1 Design Philosophy: Security & Resiliency Thinking
+
+The architecture detailed in this document is guided by a "Secure by Design" philosophy. We prioritize regulatory compliance and platform uptime above all else:
+
+- **PCI-DSS Compliance (The Business Decision)**: We consciously choose a "Zero PCI Footprint" strategy. By utilizing frontend tokenization, we ensure raw card data is handled exclusively by the Payment Gateway. This reduces our relative compliance burden from over 300 audit controls (SAQ-D) down to roughly 20 (SAQ-A), mitigating massive organizational risk.
+- **Fail-Safe Idempotency (The User Experience Decision)**: We treat every mutation request as potentially duplicated. By enforcing mandatory Idempotency keys from the portal layer, we guarantee that payment "double-clicks" or automated network retries result in exactly one transaction, protecting both the customer's wallet and the organization's reputation.
+- **Distributed Traceability (The Operational Decision)**: We acknowledge that debugging in a microservice ecosystem is complex. Our mandate for `X-Correlation-Id` passing across every network hop ensures that "Support" can identify the root cause of any transaction failure in under 5 minutes, significantly reducing Mean-Time-To-Recovery (MTTR).
+- **Asynchronous Integrity (The Settlement Decision)**: We rely on **Webhooks** and **Kafka** for final settlement. This acknowledges that banking networks are slow and unreliable. Our design ensures that if a payment is overturned 48 hours later, our background microservices will automatically orchestrate the corresponding policy revocation via the Saga pattern.
+
+---
+
 ## 2. Architecture Overview
 
 To prevent UI-specific logic from contaminating core downstream domain services, our design introduces two separate BFF applications. This adheres to the true BFF pattern, providing dedicated aggregation and orchestration layers tailored specifically to the unique needs of each frontend.
@@ -90,10 +101,8 @@ flowchart TB
 ### 2.1 Why Distinct BFFs?
 
 - **Customer BFF**: Optimized for B2C conversion. Payloads are heavily minimized for mobile networks, focusing strictly on direct purchases by an individual entity.
-- **Agent BFF**: Built for B2B2C workflows. It supports dashboard aggregations (viewing multiple clients), batch quotations, and role delegation (buying on behalf of a customer). A shared API here would lead to an overly bloated monolith over time.
-
 ### 2.2 Asynchronous Payment Webhook Flow
-Because payment gateways (Stripe, Adyen) confirm transactions asynchronously, the BFF must expose a public webhook endpoint (`POST /api/webhooks/payment`).
+Because payment gateways (Stripe, Adyen) confirm transactions asynchronously, the BFF must expose a public webhook endpoint (`POST /api/webhooks/gateway`).
 
 1. Gateway sends `payment_intent.succeeded` or `failed`.
 2. BFF validates the webhook signature (HMAC) and publishes an event to the Kafka topic `payment_events`.
@@ -133,18 +142,23 @@ I implemented an orchestrated saga where the BFF acts as the central coordinator
 ```mermaid
 sequenceDiagram
     participant Client as Portal
+    participant PG as External Gateway (Stripe)
     participant BFF as Customer BFF
     participant Q as Quotation MS
     participant P as Payment MS
-    participant PG as Payment Gateway
 
-    Client->>BFF: POST /v1/quote/purchase
+    Note over Client, PG: Step 1: Zero PCI Footprint Tokenization
+    Client->>PG: POST /tokenize (Raw Card Data)
+    PG-->>Client: token_id (tok_visa_mock)
+    
+    Note over Client, P: Step 2: Saga Transaction Flow
+    Client->>BFF: POST /v1/quote/purchase (token_id)
     BFF->>Q: POST /quotations
     Q-->>BFF: quote_id (pending)
     BFF->>P: POST /payments/intent
     P-->>BFF: payment_intent_id
-    BFF->>P: POST /payments/confirm
-    P->>PG: charge()
+    BFF->>P: POST /payments/confirm (token_id)
+    P->>PG: charge(token_id)
     alt Success
         PG-->>P: success
         P-->>BFF: status=succeeded
@@ -160,19 +174,25 @@ sequenceDiagram
 
 | Step | Action | Compensation |
 | :--- | :--- | :--- |
+| **Pre**| Client → Ext Gateway: `POST /tokenize` (Raw PAN handled) | – |
 | **1** | BFF → Quotation MS: `POST /quotations` (status = pending) | – |
 | **2** | BFF → Payment MS: `POST /payments/intent` → returns `payment_intent_id` | – |
-| **3** | BFF → Payment MS: `POST /payments/confirm` (idempotent) | If fail, jump to step 5 |
+| **3** | BFF → Payment MS: `POST /payments/confirm` (idempotent, using token_id) | If fail, jump to step 5 |
 | **4** | Payment MS → Gateway: charge success → Payment MS publishes `PaymentSucceeded` | – |
 | **5** | **If payment fails:** BFF → Quotation MS: `PUT /quotations/{id}/release` | Quote released, no policy created |
 | **6** | **If quote update fails post-payment:** BFF writes to `dead_letter_queue` | Manual reconciliation job triggered |
 
-### 3.4 Idempotency Storage
+### 3.4 Asynchronous Financial Settlement (Webhook APIs)
+While the Frontend exclusively consumes fast **REST APIs** for a seamless user experience (Step 1 Tokenization & Step 2 Purchase), enterprise payment gateways require delayed reconciliation.
+- **Gateway Webhooks**: The Payment MS exposes a dedicated **Webhook API Endpoint** (e.g., `POST /api/webhooks/gateway`) to the public internet securely (MTLS or signature verified).
+- **Purpose**: If a transaction eventually settles, is challenged via chargeback, or fails ACH clearance days after the initial checkout, the external Gateway POSTs to this Webhook. The Payment MS then natively drops a `PaymentOverturned` event into **Kafka** to orchestrate automatic asynchronous policy cancellation without Frontend involvement.
+
+### 3.5 Idempotency Storage
 - Both Quotation MS and Payment MS store `idempotency_key` + response in a DB table with a unique constraint.
 - On duplicate key, return previously stored response (ensures safe retries).
 - BFF generates key as: `sha256(customer_id + quote_hash + date)`.
 
-### 3.5 Data Retention & Deletion (PII Compliance)
+### 3.6 Data Retention & Deletion (PII Compliance)
 
 | Data Type | Retention | Deletion Method |
 | :--- | :--- | :--- |
@@ -180,7 +200,7 @@ sequenceDiagram
 | Paid policies | 7 years (legal) | Tokenized PII, reference stored separately |
 | Payment logs | 3 years | Anonymized after 1 year |
 
-### 3.6 Right to Erasure (GDPR Article 17)
+### 3.7 Right to Erasure (GDPR Article 17)
 - BFF exposes `DELETE /api/customer/data` which fans out to Quotation MS (anonymize quotes) and Payment MS (keep tokenized records but remove PII reference).
 - Agent BFF cannot delete customer data directly; requires a customer-initiated request.
 
@@ -190,8 +210,15 @@ sequenceDiagram
 
 Robust identity management protects endpoints horizontally (different roles) and vertically (different users).
 
-- **Authentication via OIDC**: Both portals authenticate against a centralized Identity Provider (Auth0/Azure AD). They receive signed JSON Web Tokens (JWT) equipped with specific claims.
-- **API Gateway Filtering**: The Gateway checks the JWKS endpoints, validating signature, expiration, and issuer before allowing traffic into the internal network.
+- **Authentication via OIDC**: Both portals authenticate against a centralized Identity Provider (Auth0/Azure AD). They receive signed JSON Web Tokens (JWT) equipped with specific claims. The PoC code physically executes `jwt.verify()` utilizing a secure secret phrase to validate token integrity.
+
+### 4.1 Token Lifespan Management (Access vs Refresh)
+To balance security with user experience, the architecture follows the OIDC standard for token longevity:
+- **Access Tokens (JWT)**: Short-lived (e.g., 60 minutes). These are used for active session authorization and are passed in the `Authorization: Bearer` header.
+- **Refresh Tokens**: Policy-driven lifespan. In high-security insurance contexts, these are often **Session-based** (expiring when the browser closes) unless the user explicitly selects "Remember Me." They are stored in a `HttpOnly` cookie. The Portal uses the Refresh Token to periodically exchange it for a new Access Token via a secure BFF endpoint, ensuring the user isn't logged out prematurely while preventing long-term exposure of an intercepted Access Token.
+
+### 4.2 API Gateway Filtering
+The Gateway checks the JWKS endpoints, validating signature, expiration, and issuer before allowing traffic into the internal network.
 - **Role-Based & Attribute-Based Authorization (RBAC/ABAC)**:
   - **Customer BFF**: Extracts the `Subject` (User ID) from the JWT. The BFF ensures a user can only request quotes or initiate payments mapped strictly to their own ID.
   - **Agent BFF**: Checks for specific Agent roles and `scopes`. When an agent requests a quote for a customer, the BFF verifies an underlying "Delegation of Authority" matrix to confirm the Agent has the necessary relationship defined with that Customer.
@@ -261,8 +288,8 @@ BFF returns problem details for all 4xx/5xx errors:
 
 ### 6.1 Resiliency Best Practices
 
-- **Circuit Breakers**: The BFF implements circuit breaking (e.g., Resilience4j or Polly). If the Quotation Microservice experiences an outage, the BFF will instantly "fail fast," returning a curated fallback message to the frontend rather than causing cascading thread exhaustion.
-- **Retries & Timeouts**: Sensible timeouts are enforced. For the downstream Payment endpoint, no automatic retries are executed on `POST` state-mutating requests unless they are strictly guaranteed to be idempotent.
+- **Circuit Breakers**: The BFF implements a custom state-based circuit breaker (CLOSED, OPEN, HALF-OPEN). If the downstream services time out or fail beyond a threshold (3 errors), the circuit trips to "OPEN," causing the BFF to fail-fast and protect system resources from thread exhaustion. This is physically implemented in `server.js`.
+- **Retries & Timeouts**: Sensible 2-second hard timeouts are enforced on internal service calls via `Promise.race`. No automatic retries are executed on `POST` state-mutating requests unless they are strictly guaranteed to be idempotent.
 
 ### 6.2 Deployment (DevSecOps)
 

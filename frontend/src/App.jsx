@@ -10,11 +10,14 @@ function App() {
 
   const [vehicleType, setVehicleType] = useState('Sedan');
   const [driverAge, setDriverAge] = useState('');
+  const [chaosMode, setChaosMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [quote, setQuote] = useState(null);
   const [correlationId, setCorrelationId] = useState('');
   const [paymentStatus, setPaymentStatus] = useState(null);
   const [idempotencyKey, setIdempotencyKey] = useState('');
+  const [cardTokenized, setCardTokenized] = useState(false);
+  const [paymentToken, setPaymentToken] = useState('');
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -43,13 +46,16 @@ function App() {
     setLoading(true);
     setQuote(null);
     setPaymentStatus(null);
+    setCardTokenized(false);
+    setPaymentToken('');
     
     try {
       const res = await fetch(`${API_URL}/quote`, {
         method: 'POST',
         headers: { 
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
+            'Authorization': `Bearer ${token}`,
+            'X-Chaos-Mode': chaosMode ? 'true' : 'false'
         },
         body: JSON.stringify({ vehicleType, driverAge: parseInt(driverAge) })
       });
@@ -62,6 +68,11 @@ function App() {
           return;
       }
       
+      if (res.status === 503) {
+          alert(`🛡️ Resiliency Block: ${data.detail}\n\nTrace ID: ${data.trace_id}`);
+          return;
+      }
+      
       const cid = res.headers.get('x-correlation-id');
       if (cid) setCorrelationId(cid);
       
@@ -70,6 +81,28 @@ function App() {
     } catch (err) {
       console.error(err);
       alert('Failed to connect to BFF Server');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleTokenizeCard = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      // Simulate frontend securely contacting an EXTERNAL Payment Gateway to tokenize the raw card
+      const externalRes = await fetch(`${API_URL.replace('/api', '')}/external-stripe-mock/tokenize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rawCardData: '1234-5678-XXXX', cvc: '123' })
+      });
+      const data = await externalRes.json();
+      if (!externalRes.ok) {
+          alert(`Gateway Error: ${data.error || 'Failed to tokenize'}`);
+          return;
+      }
+      setPaymentToken(data.token);
+      setCardTokenized(true);
     } finally {
       setLoading(false);
     }
@@ -88,7 +121,7 @@ function App() {
         },
         body: JSON.stringify({
           quoteId: quote.quoteId,
-          paymentToken: 'tok_visa_mock' // Simulated token
+          paymentToken: paymentToken // Now using the token we dynamically retrieved from the external mock
         })
       });
       
@@ -99,9 +132,9 @@ function App() {
           setLoading(false);
           return;
       }
-      if (res.status === 401) {
-          alert('Security Error: Unauthorized. Token missing or invalid.');
-          setToken('');
+      if (!res.ok) {
+          alert(`Error ${res.status}: ${data.error || 'Server error'}`);
+          if (res.status === 401) setToken('');
           return;
       }
       
@@ -157,6 +190,16 @@ function App() {
         
         {!quote ? (
           <form onSubmit={handleGetQuote}>
+            <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: 'rgba(59, 130, 246, 0.1)', border: '1px solid #3b82f6', borderRadius: '8px', fontSize: '0.8rem', color: '#60a5fa', lineHeight: '1.4' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                    <b>💡 Resiliency Demo (Sec 6.1)</b>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: chaosMode ? '#f87171' : '#60a5fa' }}>
+                        <input type="checkbox" checked={chaosMode} onChange={(e) => setChaosMode(e.target.checked)} />
+                        <span>{chaosMode ? 'Simulating Global Outage 🌪️' : 'Simulate Global Outage'}</span>
+                    </label>
+                </div>
+                Toggle <b>"Simulate Global Outage"</b> and request any quote 3 times to see the **Circuit Breaker** trip and fail-fast for the entire system!
+            </div>
             <div className="form-group">
               <label>Vehicle Type</label>
               <select value={vehicleType} onChange={(e) => setVehicleType(e.target.value)}>
@@ -194,13 +237,31 @@ function App() {
                   ✅ {paymentStatus.message}<br/>
                   <small>Txn ID: {paymentStatus.transactionId}</small>
                </div>
+            ) : !cardTokenized ? (
+                <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+                    <p style={{ fontSize: '0.85rem', marginBottom: '1rem', color: 'var(--text-muted)' }}>
+                        🔒 Step 1: Secure Frontend Tokenization<br/>
+                        (Raw PAN never touches our backend)
+                    </p>
+                    <form onSubmit={handleTokenizeCard}>
+                        <input type="text" placeholder="💳 Card Number (Mock)" required style={{width: '100%', marginBottom: '0.5rem', padding: '0.5rem'}} />
+                        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+                            <input type="text" placeholder="MM/YY" required style={{flex: 1, padding: '0.5rem'}} />
+                            <input type="text" placeholder="CVC" required style={{flex: 1, padding: '0.5rem'}} />
+                        </div>
+                        <button type="submit" disabled={loading} style={{ backgroundColor: '#10b981', fontSize: '0.9rem' }}>
+                            {loading ? <div className="spinner"></div> : 'Tokenize Securely'}
+                        </button>
+                    </form>
+                </div>
             ) : (
                 <div style={{ marginTop: '1.5rem' }}>
-                    <p style={{ fontSize: '0.8rem', marginBottom: '1rem' }}>
-                        Simulating secure frontend card tokenization...
+                    <p style={{ fontSize: '0.85rem', marginBottom: '1rem', color: '#10b981' }}>
+                        ✅ Card tokenized successfully! <br/>
+                        <code style={{background:'rgba(0,0,0,0.2)', padding:'0.2rem 0.4rem', borderRadius:'4px'}}>{paymentToken}</code>
                     </p>
                     <button onClick={handlePayment} disabled={loading} style={{ backgroundColor: 'var(--accent-color)' }}>
-                        {loading ? <div className="spinner"></div> : 'Pay & Issue Policy'}
+                        {loading ? <div className="spinner"></div> : 'Step 2: Pay & Issue Policy'}
                     </button>
                 </div>
             )}
