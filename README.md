@@ -192,7 +192,41 @@ The architecture mandates that raw Primary Account Numbers (PAN) never touch int
 | **Distributed Tracing**| **Cross-Boundary Debugging** | `X-Correlation-Id` maps the lifecycle of a request from UI → BFF → Microservices for rapid incident resolution. |
 | **Financial Saga** | **Distributed Integrity** | Orchestrated Saga (Compensation logic) ensures data consistency across Quotation and Payment microservices. |
 
-## 3. Procedure to Operate the Mock Up
+## 3. Visual Demo Walkthrough (PoC Flow)
+
+This section demonstrates the end-to-end "Vertical Slice" logic flow implemented in this PoC.
+
+### Step 1: Secure Login Gateway
+The user logs in via a secure portal. The BFF validates credentials and issues a cryptographically signed **JWT**.
+![Login Screen](./docs/01_login_screen.png)
+
+### Step 2: Tailored Quotation Request
+The user submitts vehicle and driver details. Note the **Resiliency Demo** toggle used to simulate downstream latency.
+![Quote Request](./docs/02_quote_request.png)
+
+### Step 3: Resiliency & Chaos Engineering (Circuit Breaker)
+When "Simulate Global Outage" is active, the BFF detects the timeout and the **Circuit Breaker** trips, protecting the system with an instant "fall-fast" response.
+![Resiliency Block](./docs/03_resiliency_alert.png)
+
+### Step 4: Zero PCI Footprint Tokenization
+Upon a successful quote, the user initiates payment. Raw card data is tokenized directly on the frontend to ensure it never touches our internal servers.
+![Premium & Tokenization](./docs/04_premium_tokenization.png)
+
+### Step 5: Secure Payment & Policy Issuance
+The opaque token is passed to the BFF, which orchestrates the final payment and binds the policy using an idempotent transaction.
+![Payment Confirmation](./docs/05_payment_confirmation.png)
+
+### Step 6: Successful Policy Issuance
+Once the payment is confirmed and the quote is bound, the policy is issued successfully with a unique Transaction ID.
+![Policy Issued](./docs/06_policy_issued.png)
+
+### Step 7: Idempotency Protection
+Clicking "Test Idempotency" sends a duplicate request. The BFF detects the existing transaction and rejects it with a **409 Conflict**, preventing double-charging.
+![Idempotency Conflict](./docs/07_idempotency_conflict.png)
+
+---
+
+## 4. Procedure to Operate the Mock Up
 
 ### Prerequisites
 - Node.js (v18+)
