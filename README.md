@@ -165,6 +165,43 @@ sequenceDiagram
 | **5** | **If payment fails:** BFF → Quotation MS: `PUT /quotations/{id}/release` | Quote released, no policy created |
 | **6** | **If quote update fails post-payment:** BFF writes to `dead_letter_queue` | Manual reconciliation job triggered |
 
+> [!TIP]
+> **Additional Architecture Refinement (Deep Dive)**
+>
+> The following section represents an advanced refinement of the Saga pattern, specifically addressing the distributed "Crash Gap" problem. This deep-dive is intended for discussion during the technical interview to demonstrate production-grade consistency strategies beyond the initial PoC submission.
+>
+> ---
+>
+> #### 🛡️ Advanced Transaction Integrity (The "Crash Gap")
+>
+> In a distributed orchestrator, a critical failure mode is the **"Crash Gap"**—where the system dies after a successful external action (Payment) but before persisting the state locally. 
+>
+> Our architecture closes this gap using:
+> - **Atomic State Transitions**: Every saga step is written to a distributed state store (Redis/DB) atomically.
+> - **Transactional Outbox Pattern**: State changes and event publications are committed in a single atomic transaction.
+> - **Reliable Egress**: A background relay ensures that even if the BFF crashes, the "Payment Succeeded" event is eventually published and the Saga continues.
+> - **Distributed Idempotency**: The `Idempotency-Key` ensures that even if the entire Saga is retried from the beginning, the Payment MS will detect the duplicate and return the previous success response safely.
+>
+> ```mermaid
+> sequenceDiagram
+>     participant BFF as Saga Orchestrator (BFF)
+>     participant DB as Saga DB (Outbox)
+>     participant Relay as Reliable Publisher
+>     participant K as Kafka / Event Bus
+>
+>     Note over BFF, DB: Atomic Transaction Start
+>     BFF->>DB: 1. Update Saga State (e.g., Payment=SUCCESS)
+>     BFF->>DB: 2. Insert Event into Outbox Table
+>     Note over BFF, DB: Atomic Transaction Commit
+>     
+>     Note right of BFF: ⚡ CRASH GAP WINDOW: <br/>If BFF dies here, the event is safe in DB
+>     
+>     Relay->>DB: 3. Poll for new Outbox events
+>     DB-->>Relay: Return PaymentSucceeded event
+>     Relay->>K: 4. Publish Event to Kafka
+>     Relay->>DB: 5. Mark Outbox event as PROCESSED
+> ```
+
 ### 🟢 The Backend-For-Frontend (BFF) Pattern
 The Node.js Express application genuinely acts as the dedicated "Customer BFF". It physically sits securely between the React frontend UI and the simulated downstream domain engines, shielding the core backends from UI layout churn.
 
